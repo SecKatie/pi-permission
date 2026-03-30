@@ -652,11 +652,35 @@ export async function handleMcpToolCall(
 ): Promise<{ block: true; reason: string } | undefined> {
   // Parse the MCP args to extract the target tool name
   let targetTool: string | undefined;
+  let mode: string | undefined;
   try {
     const parsed = JSON.parse(args);
-    targetTool = parsed.tool;
+    // Mode priority: tool (call) > connect > describe > search > server (list) > action > status
+    if (parsed.tool) {
+      targetTool = parsed.tool;
+      mode = "call";
+    } else if (parsed.connect) {
+      targetTool = `connect(${parsed.connect})`;
+      mode = "connect";
+    } else if (parsed.describe) {
+      targetTool = `describe(${parsed.describe})`;
+      mode = "describe";
+    } else if (parsed.search) {
+      targetTool = `search(${parsed.search})`;
+      mode = "search";
+    } else if (parsed.server) {
+      targetTool = `list(${parsed.server})`;
+      mode = "list";
+    } else if (parsed.action) {
+      targetTool = `action(${parsed.action})`;
+      mode = "action";
+    } else {
+      targetTool = "status";
+      mode = "status";
+    }
   } catch {
     targetTool = args?.slice(0, 50) || "unknown";
+    mode = "unknown";
   }
 
   const displayTool = targetTool || "unknown";
