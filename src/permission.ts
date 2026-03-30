@@ -601,6 +601,57 @@ export interface WriteToolCallOptions {
   ctx: any;
 }
 
+// Known/handled tools by the permission system
+const KNOWN_TOOLS = new Set(["bash", "write", "edit"]);
+
+/** Handle unknown tool_call - require HIGH permission */
+async function handleUnknownToolCall(
+  state: PermissionState,
+  toolName: string,
+  ctx: any
+): Promise<{ block: true; reason: string } | undefined> {
+  if (state.currentLevel === "bypassed") return undefined;
+
+  // Notify if terminal not focused (user might not see the prompt)
+  await notifySystem(
+    "Permission Required",
+    `Unknown tool "${toolName}" requires High permission level (current: ${LEVEL_INFO[state.currentLevel].label})`
+  );
+
+  // Print mode: block
+  if (!hasInteractiveUI(ctx)) {
+    return {
+      block: true,
+      reason: `Blocked by permission (${state.currentLevel}). Unknown tool: ${toolName}
+User can re-run with: PI_PERMISSION_LEVEL=high pi -p "..."`
+    };
+  }
+
+  if (state.permissionMode === "block") {
+    return {
+      block: true,
+      reason: `Blocked by permission (${state.currentLevel}, mode: block). Unknown tool: ${toolName}
+Use /permission high or /permission-mode ask to enable prompts.`
+    };
+  }
+
+  // Interactive mode: prompt
+  const choice = await ctx.ui.select(
+    `⚠️ Unknown tool requires High permission`,
+    ["Allow once", "Allow all (High)", "Cancel"]
+  );
+
+  if (choice === "Allow once") return undefined;
+
+  if (choice === "Allow all (High)") {
+    setLevel(state, "high", false, ctx);
+    ctx.ui.notify(`Permission → High (session only)`, "info");
+    return undefined;
+  }
+
+  return { block: true, reason: "Cancelled by the user. Do not attempt to repeat or circumvent." };
+}
+
 /** Handle write/edit tool_call - check permission and prompt if needed */
 export async function handleWriteToolCall(
   opts: WriteToolCallOptions
@@ -686,6 +737,11 @@ export default function (pi: ExtensionAPI) {
         filePath: event.input.path as string,
         ctx,
       });
+    }
+
+    // Unknown tools trigger HIGH permission mode
+    if (!KNOWN_TOOLS.has(event.toolName)) {
+      return handleUnknownToolCall(state, event.toolName, ctx);
     }
 
     return undefined;
