@@ -500,6 +500,38 @@ async function notifySystem(title: string, message: string): Promise<void> {
   }
 }
 
+/** Handle dangerous commands - always prompt unless in block mode */
+async function handleDangerousCommand(
+  command: string,
+  state: PermissionState,
+  ctx: any
+): Promise<{ block: true; reason: string } | undefined> {
+  await notifySystem("⚠️ Permission Required", `Dangerous command: ${command}`);
+
+  if (!hasInteractiveUI(ctx)) {
+    return {
+      block: true,
+      reason: `Dangerous command requires confirmation: ${command}
+User can re-run with: PI_PERMISSION_LEVEL=bypassed pi -p "..."`
+    };
+  }
+
+  if (state.permissionMode === "block") {
+    return {
+      block: true,
+      reason: `Blocked by permission mode (block). Dangerous command: ${command}
+Use /permission-mode ask to enable confirmations.`
+    };
+  }
+
+  const choice = await ctx.ui.select(`⚠️ Dangerous command`, ["Allow once", "Cancel"]);
+
+  if (choice !== "Allow once") {
+    return { block: true, reason: "Cancelled by the user. Do not attempt to repeat or circumvent." };
+  }
+  return undefined;
+}
+
 /** Handle bash tool_call - check permission and prompt if needed */
 export async function handleBashToolCall(
   state: PermissionState,
@@ -510,75 +542,86 @@ export async function handleBashToolCall(
 
   const classification = classifyCommand(command);
 
-  // Dangerous commands - always prompt unless in block mode
+  // Dangerous commands - always prompt (special handling)
   if (classification.dangerous) {
-    // Notify if terminal not focused (user might not see the prompt)
-    await notifySystem("⚠️ Permission Required", `Dangerous command: ${command}`);
-    
-    if (!hasInteractiveUI(ctx)) {
-      return {
-        block: true,
-        reason: `Dangerous command requires confirmation: ${command}
-User can re-run with: PI_PERMISSION_LEVEL=bypassed pi -p "..."`
-      };
-    }
-
-    if (state.permissionMode === "block") {
-      return {
-        block: true,
-        reason: `Blocked by permission mode (block). Dangerous command: ${command}
-Use /permission-mode ask to enable confirmations.`
-      };
-    }
-
-    const choice = await ctx.ui.select(
-      `⚠️ Dangerous command`,
-      ["Allow once", "Cancel"]
-    );
-
-    if (choice !== "Allow once") {
-      return { block: true, reason: "Cancelled by the user. Do not attempt to repeat or circumvent." };
-    }
-    return undefined;
+    return handleDangerousCommand(command, state, ctx);
   }
 
-  // Check level
-  const requiredIndex = LEVEL_INDEX[classification.level];
+  // Use generic permission request for level-based checks
+  return requestPermission({
+    state,
+    message: `Requires ${LEVEL_INFO[classification.level].label}`,
+    requiredLevel: classification.level,
+    details: `Command`,
+    notifyTitle: "Permission Required",
+    envVarHint: `pi -p "..."`,
+    ctx,
+  });
+}
+
+// Tools handled by specific permission checks
+// These must NOT be in KNOWN_READ_TOOLS since they need specific permission logic:
+// - bash: classified by command content
+// - write/edit: checked for Low level
+//
+// Read-only tools that can pass through without checks
+const KNOWN_READ_TOOLS = new Set(["read", "ls", "grep", "find"]);
+
+/** Options for requestPermission helper */
+interface PermissionRequestOptions {
+  state: PermissionState;
+  message: string;
+  requiredLevel: PermissionLevel;
+  details: string;
+  notifyTitle: string;
+  envVarHint: string;
+  ctx: any;
+}
+
+/** Generic permission request handler - handles block mode, print mode, ask mode */
+async function requestPermission(
+  opts: PermissionRequestOptions
+): Promise<{ block: true; reason: string } | undefined> {
+  const { state, message, requiredLevel, details, notifyTitle, envVarHint, ctx } = opts;
+
+  if (state.currentLevel === "bypassed") return undefined;
+
+  const requiredIndex = LEVEL_INDEX[requiredLevel];
   const currentIndex = LEVEL_INDEX[state.currentLevel];
 
-  if (requiredIndex <= currentIndex) return undefined;
+  // Already have sufficient permission
+  if (currentIndex >= requiredIndex) return undefined;
 
-  const requiredLevel = classification.level;
   const requiredInfo = LEVEL_INFO[requiredLevel];
 
-  // Notify if terminal not focused (user might not see the prompt)
+  // Notify if terminal not focused
   await notifySystem(
-    "Permission Required",
-    `Command requires ${requiredInfo.label} level (current: ${LEVEL_INFO[state.currentLevel].label})`
+    notifyTitle,
+    `${details} requires ${requiredInfo.label} level (current: ${LEVEL_INFO[state.currentLevel].label})`
   );
 
   // Print mode: block
   if (!hasInteractiveUI(ctx)) {
     return {
       block: true,
-      reason: `Blocked by permission (${state.currentLevel}). Command: ${command}
-Allowed at this level: ${LEVEL_ALLOWED_DESC[state.currentLevel]}
-User can re-run with: PI_PERMISSION_LEVEL=${requiredLevel} pi -p "..."`
+      reason: `${message}
+Blocked by permission (${state.currentLevel}). Allowed at this level: ${LEVEL_ALLOWED_DESC[state.currentLevel]}
+User can re-run with: PI_PERMISSION_LEVEL=${requiredLevel} ${envVarHint}`
     };
   }
 
   if (state.permissionMode === "block") {
     return {
       block: true,
-      reason: `Blocked by permission (${state.currentLevel}, mode: block). Command: ${command}
-Requires ${requiredInfo.label}. Allowed at this level: ${LEVEL_ALLOWED_DESC[state.currentLevel]}
+      reason: `${message}
+Blocked by permission (${state.currentLevel}, mode: block). Requires ${requiredInfo.label}.
 Use /permission ${requiredLevel} or /permission-mode ask to enable prompts.`
     };
   }
 
   // Interactive mode: prompt
   const choice = await ctx.ui.select(
-    `Requires ${requiredInfo.label}`,
+    message,
     ["Allow once", `Allow all (${requiredInfo.label})`, "Cancel"]
   );
 
@@ -601,13 +644,39 @@ export interface WriteToolCallOptions {
   ctx: any;
 }
 
-// Tools handled by specific permission checks
-// These must NOT be in KNOWN_READ_TOOLS since they need specific permission logic:
-// - bash: classified by command content
-// - write/edit: checked for Low level
-//
-// Read-only tools that can pass through without checks
-const KNOWN_READ_TOOLS = new Set(["read", "ls", "grep", "find"]);
+/** Handle mcp tool_call - show target tool and require MEDIUM permission */
+export async function handleMcpToolCall(
+  state: PermissionState,
+  args: string,
+  ctx: any
+): Promise<{ block: true; reason: string } | undefined> {
+  // Parse the MCP args to extract the target tool name
+  let targetTool: string | undefined;
+  try {
+    const parsed = JSON.parse(args);
+    targetTool = parsed.tool;
+  } catch {
+    targetTool = args?.slice(0, 50) || "unknown";
+  }
+
+  const displayTool = targetTool || "unknown";
+
+  // Show notification even if we have permission
+  if (LEVEL_INDEX[state.currentLevel] >= LEVEL_INDEX["medium"]) {
+    ctx.ui.notify(`MCP tool: ${displayTool}`, "info");
+    return undefined;
+  }
+
+  return requestPermission({
+    state,
+    message: `MCP tool wants to call: ${displayTool}`,
+    requiredLevel: "medium",
+    details: `MCP tool "${displayTool}"`,
+    notifyTitle: "MCP Tool Call",
+    envVarHint: 'pi -p "..."',
+    ctx,
+  });
+}
 
 /** Handle unknown tool_call - require HIGH permission */
 async function handleUnknownToolCall(
@@ -615,46 +684,15 @@ async function handleUnknownToolCall(
   toolName: string,
   ctx: any
 ): Promise<{ block: true; reason: string } | undefined> {
-  if (state.currentLevel === "bypassed") return undefined;
-
-  // Notify if terminal not focused (user might not see the prompt)
-  await notifySystem(
-    "Permission Required",
-    `Unknown tool "${toolName}" requires High permission level (current: ${LEVEL_INFO[state.currentLevel].label})`
-  );
-
-  // Print mode: block
-  if (!hasInteractiveUI(ctx)) {
-    return {
-      block: true,
-      reason: `Blocked by permission (${state.currentLevel}). Unknown tool: ${toolName}
-User can re-run with: PI_PERMISSION_LEVEL=high pi -p "..."`
-    };
-  }
-
-  if (state.permissionMode === "block") {
-    return {
-      block: true,
-      reason: `Blocked by permission (${state.currentLevel}, mode: block). Unknown tool: ${toolName}
-Use /permission high or /permission-mode ask to enable prompts.`
-    };
-  }
-
-  // Interactive mode: prompt
-  const choice = await ctx.ui.select(
-    `⚠️ Unknown tool "${toolName}" requires High permission`,
-    ["Allow once", "Allow all (High)", "Cancel"]
-  );
-
-  if (choice === "Allow once") return undefined;
-
-  if (choice === "Allow all (High)") {
-    setLevel(state, "high", false, ctx);
-    ctx.ui.notify(`Permission → High (session only)`, "info");
-    return undefined;
-  }
-
-  return { block: true, reason: "Cancelled by the user. Do not attempt to repeat or circumvent." };
+  return requestPermission({
+    state,
+    message: `⚠️ Unknown tool "${toolName}" requires High permission`,
+    requiredLevel: "high",
+    details: `Unknown tool "${toolName}"`,
+    notifyTitle: "Permission Required",
+    envVarHint: 'pi -p "..."',
+    ctx,
+  });
 }
 
 /** Handle write/edit tool_call - check permission and prompt if needed */
@@ -664,49 +702,19 @@ export async function handleWriteToolCall(
   const { state, toolName, filePath, ctx } = opts;
 
   if (state.currentLevel === "bypassed") return undefined;
-
   if (LEVEL_INDEX[state.currentLevel] >= LEVEL_INDEX["low"]) return undefined;
 
   const action = toolName === "write" ? "Write" : "Edit";
-  const message = `Requires Low: ${action} ${filePath}`;
 
-  // Notify if terminal not focused (user might not see the prompt)
-  await notifySystem("Permission Required", `${action} requires Low permission level (current: ${LEVEL_INFO[state.currentLevel].label})`);
-
-  // Print mode: block
-  if (!hasInteractiveUI(ctx)) {
-    return {
-      block: true,
-      reason: `Blocked by permission (${state.currentLevel}). ${action}: ${filePath}
-Allowed at this level: ${LEVEL_ALLOWED_DESC[state.currentLevel]}
-User can re-run with: PI_PERMISSION_LEVEL=low pi -p "..."`
-    };
-  }
-
-  if (state.permissionMode === "block") {
-    return {
-      block: true,
-      reason: `Blocked by permission (${state.currentLevel}, mode: block). ${action}: ${filePath}
-Requires Low. Allowed at this level: ${LEVEL_ALLOWED_DESC[state.currentLevel]}
-Use /permission low or /permission-mode ask to enable prompts.`
-    };
-  }
-
-  // Interactive mode: prompt
-  const choice = await ctx.ui.select(
-    message,
-    ["Allow once", "Allow all (Low)", "Cancel"]
-  );
-
-  if (choice === "Allow once") return undefined;
-
-  if (choice === "Allow all (Low)") {
-    setLevel(state, "low", false, ctx);
-    ctx.ui.notify(`Permission → Low (session only)`, "info");
-    return undefined;
-  }
-
-  return { block: true, reason: "Cancelled by the user. Do not attempt to repeat or circumvent." };
+  return requestPermission({
+    state,
+    message: `Requires Low: ${action} ${filePath}`,
+    requiredLevel: "low",
+    details: `${action}`,
+    notifyTitle: "Permission Required",
+    envVarHint: 'pi -p "..."',
+    ctx,
+  });
 }
 
 // ============================================================================
@@ -733,6 +741,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName === "bash") {
       return handleBashToolCall(state, event.input.command as string, ctx);
+    }
+
+    // MCP tool - show which tool it wants to call
+    if (event.toolName === "mcp") {
+      const input = event.input as { args?: string };
+      return handleMcpToolCall(state, input.args || "{}", ctx);
     }
 
     // File write/edit operations (write, edit)
