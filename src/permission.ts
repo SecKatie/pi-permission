@@ -500,6 +500,12 @@ async function notifySystem(title: string, message: string): Promise<void> {
   }
 }
 
+/** Truncate a string for display, adding ellipsis if needed */
+function truncate(s: string, maxLen = 80): string {
+  const trimmed = s.trim();
+  return trimmed.length > maxLen ? trimmed.slice(0, maxLen - 1) + "…" : trimmed;
+}
+
 /** Handle dangerous commands - always prompt unless in block mode */
 async function handleDangerousCommand(
   command: string,
@@ -524,7 +530,7 @@ Use /permission-mode ask to enable confirmations.`
     };
   }
 
-  const choice = await ctx.ui.select(`⚠️ Dangerous command`, ["Allow once", "Cancel"]);
+  const choice = await ctx.ui.select(`⚠️ Dangerous: $ ${truncate(command)}`, ["Allow once", "Cancel"]);
 
   if (choice !== "Allow once") {
     return { block: true, reason: "Cancelled by the user. Do not attempt to repeat or circumvent." };
@@ -547,12 +553,14 @@ export async function handleBashToolCall(
     return handleDangerousCommand(command, state, ctx);
   }
 
+  const displayCmd = truncate(command);
+
   // Use generic permission request for level-based checks
   return requestPermission({
     state,
-    message: `Requires ${LEVEL_INFO[classification.level].label}`,
+    message: `$ ${displayCmd}`,
     requiredLevel: classification.level,
-    details: `Command`,
+    details: `Command: ${displayCmd}`,
     notifyTitle: "Permission Required",
     envVarHint: `pi -p "..."`,
     ctx,
@@ -620,14 +628,16 @@ Use /permission ${requiredLevel} or /permission-mode ask to enable prompts.`
   }
 
   // Interactive mode: prompt
+  const promptTitle = `${message}  [requires ${requiredInfo.label}]`;
+  const allowAllLabel = `Allow all ${requiredInfo.label} (session)`;
   const choice = await ctx.ui.select(
-    message,
-    ["Allow once", `Allow all (${requiredInfo.label})`, "Cancel"]
+    promptTitle,
+    ["Allow once", allowAllLabel, "Cancel"]
   );
 
   if (choice === "Allow once") return undefined;
 
-  if (choice === `Allow all (${requiredInfo.label})`) {
+  if (choice === allowAllLabel) {
     setLevel(state, requiredLevel, false, ctx);
     ctx.ui.notify(`Permission → ${requiredInfo.label} (session only)`, "info");
     return undefined;
