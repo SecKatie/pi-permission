@@ -1,0 +1,51 @@
+{
+  "name": "pi-permission",
+  "version": "1.0.2",
+  "description": "Layered permission control extension for pi-coding-agent (no sound)",
+  "type": "module",
+  "main": "./dist/permission.js",
+  "types": "./dist/permission.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/permission.d.ts",
+      "import": "./dist/permission.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "npx tsx tests/permission.test.ts",
+    "prepublishOnly": "tsc"
+  },
+  "keywords": [
+    "permission",
+    "security",
+    "pi-coding-agent",
+    "extension",
+    "pi-package"
+  ],
+  "author": "SecKatie",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SecKatie/pi-permission.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SecKatie/pi-permission/issues"
+  },
+  "homepage": "https://github.com/SecKatie/pi-permission#readme",
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.50.0"
+  },
+  "dependencies": {
+    "shell-quote": "^1.8.3"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.63.1",
+    "@types/node": "^25.0.3",
+    "@types/shell-quote": "^1.7.5",
+    "typescript": "^5.9.3"
+  }
+}
