@@ -601,8 +601,13 @@ export interface WriteToolCallOptions {
   ctx: any;
 }
 
-// Known/handled tools by the permission system
-const KNOWN_TOOLS = new Set(["bash", "write", "edit"]);
+// Tools handled by specific permission checks
+// These must NOT be in KNOWN_READ_TOOLS since they need specific permission logic:
+// - bash: classified by command content
+// - write/edit: checked for Low level
+//
+// Read-only tools that can pass through without checks
+const KNOWN_READ_TOOLS = new Set(["read", "ls", "grep", "find"]);
 
 /** Handle unknown tool_call - require HIGH permission */
 async function handleUnknownToolCall(
@@ -637,7 +642,7 @@ Use /permission high or /permission-mode ask to enable prompts.`
 
   // Interactive mode: prompt
   const choice = await ctx.ui.select(
-    `⚠️ Unknown tool requires High permission`,
+    `⚠️ Unknown tool "${toolName}" requires High permission`,
     ["Allow once", "Allow all (High)", "Cancel"]
   );
 
@@ -730,17 +735,19 @@ export default function (pi: ExtensionAPI) {
       return handleBashToolCall(state, event.input.command as string, ctx);
     }
 
-    if (event.toolName === "write" || event.toolName === "edit") {
+    // File write/edit operations (write, edit)
+    if (["write", "edit"].includes(event.toolName)) {
+      const input = event.input as { path: string };
       return handleWriteToolCall({
         state,
         toolName: event.toolName,
-        filePath: event.input.path as string,
+        filePath: input.path,
         ctx,
       });
     }
 
     // Unknown tools trigger HIGH permission mode
-    if (!KNOWN_TOOLS.has(event.toolName)) {
+    if (!KNOWN_READ_TOOLS.has(event.toolName)) {
       return handleUnknownToolCall(state, event.toolName, ctx);
     }
 

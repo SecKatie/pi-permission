@@ -1,6 +1,6 @@
 {
   "name": "pi-permission",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Layered permission control extension for pi-coding-agent (no sound)",
   "type": "module",
   "main": "./dist/permission.js",
