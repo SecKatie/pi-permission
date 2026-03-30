@@ -575,6 +575,65 @@ export async function handleBashToolCall(
 // Read-only tools that can pass through without checks
 const KNOWN_READ_TOOLS = new Set(["read", "ls", "grep", "find"]);
 
+// MCP tool calls that are read-only - only require Low permission
+const READONLY_MCP_TOOLS = new Set([
+  // Serper (Google search)
+  "serper_search",
+  "serper_scrape",
+
+  // GitHub - read operations
+  "github_get_commit",
+  "github_get_file_contents",
+  "github_get_label",
+  "github_get_latest_release",
+  "github_get_me",
+  "github_get_release_by_tag",
+  "github_get_tag",
+  "github_get_team_members",
+  "github_get_teams",
+  "github_issue_read",
+  "github_pull_request_read",
+  "github_list_branches",
+  "github_list_commits",
+  "github_list_issue_types",
+  "github_list_issues",
+  "github_list_pull_requests",
+  "github_list_releases",
+  "github_list_tags",
+  "github_search_code",
+  "github_search_issues",
+  "github_search_pull_requests",
+  "github_search_repositories",
+  "github_search_users",
+
+  // Atlassian - read operations
+  "atlassian_atlassianUserInfo",
+  "atlassian_getAccessibleAtlassianResources",
+  "atlassian_getConfluencePage",
+  "atlassian_searchConfluenceUsingCql",
+  "atlassian_getConfluenceSpaces",
+  "atlassian_getPagesInConfluenceSpace",
+  "atlassian_getConfluencePageFooterComments",
+  "atlassian_getConfluencePageInlineComments",
+  "atlassian_getConfluenceCommentChildren",
+  "atlassian_getConfluencePageDescendants",
+  "atlassian_getJiraIssue",
+  "atlassian_getTransitionsForJiraIssue",
+  "atlassian_getJiraIssueRemoteIssueLinks",
+  "atlassian_getVisibleJiraProjects",
+  "atlassian_getJiraProjectIssueTypesMetadata",
+  "atlassian_getJiraIssueTypeMetaWithFields",
+  "atlassian_searchJiraIssuesUsingJql",
+  "atlassian_searchAtlassian",
+  "atlassian_fetchAtlassian",
+  "atlassian_lookupJiraAccountId",
+  "atlassian_getIssueLinkTypes",
+]);
+
+// MCP modes that are informational/read-only - only require Low permission
+// These don't execute any tool, just query metadata
+const MCP_READ_ONLY_MODES = new Set(["search", "describe", "list", "status", "connect"]);
+
 /** Options for requestPermission helper */
 interface PermissionRequestOptions {
   state: PermissionState;
@@ -657,55 +716,63 @@ export interface WriteToolCallOptions {
 /** Handle mcp tool_call - show target tool and require MEDIUM permission */
 export async function handleMcpToolCall(
   state: PermissionState,
-  args: string,
+  input: Record<string, any>,
   ctx: any
 ): Promise<{ block: true; reason: string } | undefined> {
-  // Parse the MCP args to extract the target tool name
-  let targetTool: string | undefined;
-  let mode: string | undefined;
-  try {
-    const parsed = JSON.parse(args);
-    // Mode priority: tool (call) > connect > describe > search > server (list) > action > status
-    if (parsed.tool) {
-      targetTool = parsed.tool;
-      mode = "call";
-    } else if (parsed.connect) {
-      targetTool = `connect(${parsed.connect})`;
-      mode = "connect";
-    } else if (parsed.describe) {
-      targetTool = `describe(${parsed.describe})`;
-      mode = "describe";
-    } else if (parsed.search) {
-      targetTool = `search(${parsed.search})`;
-      mode = "search";
-    } else if (parsed.server) {
-      targetTool = `list(${parsed.server})`;
-      mode = "list";
-    } else if (parsed.action) {
-      targetTool = `action(${parsed.action})`;
-      mode = "action";
-    } else {
-      targetTool = "status";
-      mode = "status";
-    }
-  } catch {
-    targetTool = args?.slice(0, 50) || "unknown";
-    mode = "unknown";
+  // Determine the mode and target from the input parameters
+  // Mode priority: tool (call) > connect > describe > search > server (list) > action > status
+  let targetTool: string;
+  let mode: string;
+
+  if (input.tool) {
+    targetTool = input.tool;
+    mode = "call";
+  } else if (input.connect) {
+    targetTool = `connect(${input.connect})`;
+    mode = "connect";
+  } else if (input.describe) {
+    targetTool = `describe(${input.describe})`;
+    mode = "describe";
+  } else if (input.search) {
+    targetTool = `search(${input.search})`;
+    mode = "search";
+  } else if (input.server) {
+    targetTool = `list(${input.server})`;
+    mode = "list";
+  } else if (input.action) {
+    targetTool = `action(${input.action})`;
+    mode = "action";
+  } else {
+    targetTool = "status";
+    mode = "status";
   }
 
-  const displayTool = targetTool || "unknown";
+  // Determine required permission level based on what's being called
+  let requiredLevel: PermissionLevel;
+
+  if (MCP_READ_ONLY_MODES.has(mode)) {
+    // Informational MCP operations (search, describe, list, status, connect) are minimal
+    // These only query pi's internal MCP gateway metadata, no external service calls
+    requiredLevel = "minimal";
+  } else if (mode === "call" && READONLY_MCP_TOOLS.has(targetTool)) {
+    // Known read-only search tool calls are low - they query external APIs but are read-only
+    requiredLevel = "low";
+  } else {
+    // All other MCP tool calls require medium
+    requiredLevel = "medium";
+  }
 
   // Show notification even if we have permission
-  if (LEVEL_INDEX[state.currentLevel] >= LEVEL_INDEX["medium"]) {
-    ctx.ui.notify(`MCP tool: ${displayTool}`, "info");
+  if (LEVEL_INDEX[state.currentLevel] >= LEVEL_INDEX[requiredLevel]) {
+    ctx.ui.notify(`MCP tool: ${targetTool}`, "info");
     return undefined;
   }
 
   return requestPermission({
     state,
-    message: `MCP tool wants to call: ${displayTool}`,
-    requiredLevel: "medium",
-    details: `MCP tool "${displayTool}"`,
+    message: `MCP tool wants to call: ${targetTool}`,
+    requiredLevel,
+    details: `MCP tool "${targetTool}"`,
     notifyTitle: "MCP Tool Call",
     envVarHint: 'pi -p "..."',
     ctx,
@@ -779,8 +846,7 @@ export default function (pi: ExtensionAPI) {
 
     // MCP tool - show which tool it wants to call
     if (event.toolName === "mcp") {
-      const input = event.input as { args?: string };
-      return handleMcpToolCall(state, input.args || "{}", ctx);
+      return handleMcpToolCall(state, event.input, ctx);
     }
 
     // File write/edit operations (write, edit)
