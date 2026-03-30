@@ -484,7 +484,6 @@ async function notifySystem(title: string, message: string): Promise<void> {
   const focused = await isTerminalFocused();
   if (focused) return;
   
-  const escQuote = (s: string) => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   
   try {
     if (process.platform === "darwin") {
@@ -492,13 +491,7 @@ async function notifySystem(title: string, message: string): Promise<void> {
       const tnArgs = ['-title', title, '-message', message];
       if (bundleId) tnArgs.push('-activate', bundleId);
 
-      execFile('terminal-notifier', tnArgs, (err) => {
-        if (err) {
-          execFile('osascript', ['-e',
-            `display notification "${escQuote(message)}" with title "${escQuote(title)}"`
-          ], () => {});
-        }
-      });
+      execFile('terminal-notifier', tnArgs, () => {});
     } else if (process.platform === "linux") {
       execFile('notify-send', ['-u', 'critical', title, message], () => {});
     }
